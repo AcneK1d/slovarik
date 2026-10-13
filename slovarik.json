@@ -1,0 +1,11 @@
+{
+  "hotkey": "ctrl+space",
+  "suppress_hotkey": false,
+  "opacity": 0.98,
+  "width": 480,
+  "height": 410,
+  "top_ratio": 0.16,
+  "timeout": 10,
+  "retries": 2,
+  "max_defs": 5
+}
