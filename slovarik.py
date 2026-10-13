@@ -30,7 +30,7 @@ from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 
 APP_NAME = 'Словарик'
-APP_VERSION = '1.0'
+APP_VERSION = '1.1'
 CONFIG_FILE = 'slovarik.json'
 CACHE_FILE = 'slovarik_cache.json'
 LOG_FILE = 'slovarik.log'
@@ -111,7 +111,12 @@ def http_get_json(url, params=None, timeout=10, retries=2, max_rate_wait=3.0):
 _CACHE = None
 _CACHE_LOCK = threading.Lock()
 _CACHE_MAX = 800
-_NOCACHE = object()
+CACHE_FORMAT = 2   # увеличивайте при изменениях разбора: старый кэш будет сброшен
+
+
+def _cache_fits(entry):
+    """Запись кэша сделана текущей версией разбора."""
+    return isinstance(entry, dict) and entry.get('t') and ('v' in entry)
 
 
 def _cache_path():
@@ -122,18 +127,23 @@ def _load_cache():
     global _CACHE
     with _CACHE_LOCK:
         if _CACHE is None:
+            data = {}
             try:
                 with open(_cache_path(), 'r', encoding='utf-8') as f:
-                    _CACHE = json.load(f)
+                    data = json.load(f)
+                if not isinstance(data, dict) or data.get('__format__') != CACHE_FORMAT:
+                    data = {}   # кэш сделан другой версией разбора — обнуляем
             except (OSError, ValueError):
-                _CACHE = {}
+                data = {}
+            data['__format__'] = CACHE_FORMAT
+            _CACHE = data
         return _CACHE
 
 
 def cache_get(key):
     """(найдено, значение); значение может быть None — «страницы нет»."""
     entry = _load_cache().get(key)
-    if not entry:
+    if not entry or not _cache_fits(entry):
         return False, None
     ttl = 30 * 86400 if entry.get('v') is not None else 86400
     if time.time() - entry.get('t', 0) > ttl:
@@ -145,8 +155,11 @@ def cache_put(key, value):
     cache = _load_cache()
     with _CACHE_LOCK:
         cache[key] = {'t': time.time(), 'v': value}
-        if len(cache) > _CACHE_MAX:  # выбрасываем самые старые записи
-            for k in sorted(cache, key=lambda k: cache[k].get('t', 0))[:len(cache) - _CACHE_MAX]:
+        cache['__format__'] = CACHE_FORMAT
+        real_keys = [k for k in cache if k != '__format__']
+        if len(real_keys) > _CACHE_MAX:   # выбрасываем самые старые записи
+            oldest = sorted(real_keys, key=lambda k: cache[k].get('t', 0))
+            for k in oldest[:len(real_keys) - _CACHE_MAX]:
                 cache.pop(k, None)
         try:
             tmp = _cache_path() + '.tmp'
@@ -192,7 +205,8 @@ DROP_TEMPLATES = {
     'нп', 'категория', 'category', 'нее', 'фото', 'изображение', 'иллюстрация',
     'картинка', 'slim', 'clear', 'оформление', 'якорь', 'anchor', 'з', 'навигация',
     'лексема в викиданных', 'wikipedia', 'wikipediabox', 'википедия', 'викисловарь',
-    'перенесено из википедии', 'к', 'ъ', 'ё',
+    'перенесено из википедии', 'к', 'ъ', 'ё', 'омонимы', 'improve', 'длина слова',
+    'слобр', 'offensive', 'transcriptions-ru', 't-ru', 'wikidata', 'л', 'refless',
 }
 
 DROP_PREFIXES = ('этимолог', 'иллюстра', 'фото', 'картин', 'trans', 'itt', 'usex', 'uxi',
@@ -202,41 +216,98 @@ DROP_PREFIXES = ('этимолог', 'иллюстра', 'фото', 'карти
 CONTEXT_MARKS = {
     'зоол.': 'зоол.', 'бот.': 'бот.', 'анат.': 'анат.', 'физиол.': 'физиол.',
     'мед.': 'мед.', 'психол.': 'психол.', 'псих.': 'психол.', 'хим.': 'хим.',
-    'физ.': 'физ.', 'мат.': 'мат.', 'лингв.': 'лингв.', 'грам.': 'грам.',
-    'муз.': 'муз.', 'спорт.': 'спорт.', 'техн.': 'техн.', 'тех.': 'техн.',
-    'морск.': 'морск.', 'воен.': 'воен.', 'авиац.': 'авиац.', 'астрон.': 'астрон.',
-    'геогр.': 'геогр.', 'геол.': 'геол.', 'экон.': 'экон.', 'филос.': 'филос.',
-    'филол.': 'филол.', 'ист.': 'ист.', 'религ.': 'религ.', 'церк.': 'церк.',
-    'кулин.': 'кулин.', 'прост.': 'прост.', 'разг.': 'разг.', 'устар.': 'устар.',
-    'книжн.': 'книжн.', 'поэт.': 'поэт.', 'публиц.': 'публиц.', 'научн.': 'научн.',
-    'ирон.': 'ирон.', 'шутл.': 'шутл.', 'ласк.': 'ласк.', 'уменьш.': 'уменьш.',
-    'увелич.': 'увелич.', 'перен.': 'перен.', 'спец.': 'спец.', 'обл.': 'обл.',
-    'диал.': 'диал.', 'сленг': 'сленг', 'жарг.': 'жарг.', 'детск.': 'детск.',
-    'неодобр.': 'неодобр.', 'одобр.': 'одобр.', 'презр.': 'презр.', 'пренебр.': 'пренебр.',
-    'груб.': 'груб.', 'эвф.': 'эвф.', 'собир.': 'собир.', 'п.': 'перен.',
-    'биол.': 'биол.', 'геом.': 'геом.', 'информ.': 'информ.', 'полит.': 'полит.',
-    'юр.': 'юр.', 'бухг.': 'бухг.', 'кулинар.': 'кулин.', 'нар.-поэт.': 'нар.-поэт.',
+    'физ.': 'физ.', 'мат.': 'мат.', 'матем.': 'матем.', 'лингв.': 'лингв.',
+    'грам.': 'грам.', 'муз.': 'муз.', 'спорт.': 'спорт.', 'техн.': 'техн.',
+    'тех.': 'тех.', 'морск.': 'морск.', 'воен.': 'воен.', 'авиац.': 'авиац.',
+    'астрон.': 'астрон.', 'геогр.': 'геогр.', 'геол.': 'геол.', 'экон.': 'экон.',
+    'филос.': 'филос.', 'филол.': 'филол.', 'ист.': 'ист.', 'истор.': 'истор.',
+    'религ.': 'религ.', 'церк.': 'церк.', 'кулин.': 'кулин.', 'прост.': 'прост.',
+    'разг.': 'разг.', 'устар.': 'устар.', 'книжн.': 'книжн.', 'поэт.': 'поэт.',
+    'публиц.': 'публиц.', 'научн.': 'научн.', 'ирон.': 'ирон.', 'шутл.': 'шутл.',
+    'ласк.': 'ласк.', 'уменьш.': 'уменьш.', 'увелич.': 'увелич.', 'перен.': 'перен.',
+    'спец.': 'спец.', 'обл.': 'обл.', 'диал.': 'диал.', 'сленг': 'сленг',
+    'жарг.': 'жарг.', 'детск.': 'детск.', 'неодобр.': 'неодобр.', 'одобр.': 'одобр.',
+    'презр.': 'презр.', 'пренебр.': 'пренебр.', 'груб.': 'груб.', 'эвф.': 'эвф.',
+    'собир.': 'собир.', 'п.': 'перен.', 'биол.': 'биол.', 'геом.': 'геом.',
+    'информ.': 'информ.', 'полит.': 'полит.', 'юр.': 'юр.', 'бухг.': 'бухг.',
+    'кулинар.': 'кулин.', 'нар.-поэт.': 'нар.-поэт.', 'мол.': 'мол.',
+    'сниж.': 'сниж.', 'уничиж.': 'уничиж.', 'обсц.': 'обсц.', 'бран.': 'бран.',
+    'бранн.': 'бран.', 'ритор.': 'ритор.', 'неодуш.': 'неодуш.', 'одуш.': 'одуш.',
+    'несов.': 'несов.', 'сов.': 'сов.', 'вульг.': 'вульг.', 'культурол.': 'культурол.',
+    'социол.': 'социол.', 'игр.': 'игр.', 'комп.': 'комп.', 'прогр.': 'прогр.',
+    'сет.': 'сет.', 'школьн.': 'школьн.', 'студ.': 'студ.', 'мифол.': 'мифол.',
+    'библ.': 'библ.', 'охотн.': 'охотн.', 'рыб.': 'рыб.', 'пчел.': 'пчел.',
+    'сад.': 'сад.', 'строит.': 'строит.', 'ж.-д.': 'ж.-д.', 'автомоб.': 'автомоб.',
+    'косм.': 'косм.', 'генет.': 'генет.', 'биохим.': 'биохим.', 'фарм.': 'фарм.',
+    'психол.': 'психол.', 'этногр.': 'этногр.', 'фольк.': 'фольк.', 'неол.': 'неол.',
 }
+
+# Служебные символы: {{-}} -> «-», {{--}} -> «—», {{!}} -> «|» и т. п.
+DASH_LITERALS = {'-': '-', '--': '—', '---': '—', '—': '—'}
+SPECIAL_TEXT = {'итп': ' и т. п.', 'итд': ' и т. д.', 'итпр': ' и т. п.',
+                'nbsp': ' ', '~': ' ', '·': ' ', '!': '|', '!-': '|-'}
 
 # Шаблоны, у которых оставляем последний аргумент как текст
 KEEP_LAST_ARG = {
     'выдел', 'выделение', 'курсив', 'полужирный', 'em', 'i', 'b', 'strong', 'u', 's',
     'lang', 'язык', 'm', 'l', 'link', 'term', 'mention', 'abbr', 'tooltip', 'nobr',
-    'small', 'span', 'font', 'big', 'sub', 'sup', 't', 't:=', 'знач', 'значение',
-    'знач.', 'tooltip-lang', 'шрифт', 'цвет', 'флэш',
+    'small', 'span', 'font', 'big', 'sub', 'sup', 't', 'знач', 'значение',
+    'знач.', 'tooltip-lang', 'шрифт', 'цвет', 'флэш', '==', '===', '====', 'wy',
 }
+
+# Шаблоны-термины: «t:=|слово» или «t:=|слово|пояснение»
+DASH_JOIN_TEMPLATES = {'t:=', 't=', 'термин', 'term:'}
 
 # Шаблоны с подписью-пометой: {{gloss|...}}, {{lb|en|...}}
 LABEL_TEMPLATES = {'qualifier', 'lb', 'lbl', 'label', 'gloss', 'q', 'context',
-                   'контекст', 'помета', 'mark'}
+                   'контекст', 'помета', 'пометка', 'mark'}
+
+
+def split_template_args(inner):
+    """Разбить содержимое шаблона по «|» верхнего уровня (учитывая {{...}} и [[...]])."""
+    parts = []
+    current = []
+    braces = 0
+    links = 0
+    i = 0
+    while i < len(inner):
+        if inner.startswith('{{', i):
+            braces += 1
+            current.append('{{')
+            i += 2
+            continue
+        if inner.startswith('}}', i):
+            braces -= 1
+            current.append('}}')
+            i += 2
+            continue
+        if inner.startswith('[[', i):
+            links += 1
+            current.append('[[')
+            i += 2
+            continue
+        if inner.startswith(']]', i):
+            links -= 1
+            current.append(']]')
+            i += 2
+            continue
+        ch = inner[i]
+        if ch == '|' and braces <= 0 and links <= 0:
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    parts.append(''.join(current))
+    return parts
 
 
 def handle_template(inner):
     """Преобразовать содержимое одного шаблона {{...}} в текст (или пустоту)."""
-    parts = [p.strip() for p in inner.split('|')]
+    parts = split_template_args(inner)
     name = re.sub(r'\s+', ' ', parts[0]).strip()
     low = name.lower()
-    args = parts[1:]
+    args = [p.strip() for p in parts[1:]]
     pos_args = [p for p in args if '=' not in p and p != '']
     last = pos_args[-1] if pos_args else ''
 
@@ -245,27 +316,45 @@ def handle_template(inner):
     if any(low.startswith(p) for p in DROP_PREFIXES):
         return ''
 
-    key = low if low.endswith('.') else low + '.'
-    if key in CONTEXT_MARKS:
-        return '(%s)' % CONTEXT_MARKS[key]
-
+    if low in DASH_LITERALS:
+        return DASH_LITERALS[low]
+    if low in SPECIAL_TEXT:
+        return SPECIAL_TEXT[low]
+    if low in ('"', '«', 'кавычки'):
+        return '«%s»' % last if last else ''
+    if low and set(low) <= {'='}:           # {{===|онанист}} — «онанист»
+        return last
+    if low in DASH_JOIN_TEMPLATES:          # {{t:=|термин|пояснение}}
+        return ' — '.join(pos_args)
     if low == 'свойство':
         for a in reversed(pos_args):
             if re.fullmatch(r'[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-]*', a):
                 return 'свойство по значению прилагательного %s' % a
         return ''
 
-    if low in LABEL_TEMPLATES:
+    key = low if low.endswith('.') else low + '.'
+    if key in CONTEXT_MARKS:
+        return '(%s)' % CONTEXT_MARKS[key]
+
+    base = low.rstrip('.')
+    if base in LABEL_TEMPLATES:
         vals = [a for a in pos_args if not re.fullmatch(r'[a-z]{2,3}(-[a-z]+)?', a)]
         return '(%s)' % ', '.join(vals) if vals else ''
 
     if low == 'verb-dir':
         return ('→ ' + last) if last else ''
-
     if low in KEEP_LAST_ARG:
         return last
 
-    return ''  # неизвестный шаблон — выбрасываем
+    # Обобщённая помета вида «мол.», «несов.», «техн.жарг.», «др.-рус.»
+    if re.fullmatch(r'[А-Яа-яЁё][А-Яа-яЁё\-]{1,21}(?:\.[А-Яа-яЁё\-]{1,21})*\.', low):
+        parts2 = low[:-1].split('.')          # убираем завершающую точку
+        label = parts2[0]
+        for p in parts2[1:]:
+            label += ('.' if p.startswith('-') else '. ') + p
+        return '(%s.)' % label
+
+    return ''  # остальные неизвестные шаблоны выбрасываем
 
 
 def render_templates(text, guard=400):
@@ -327,6 +416,12 @@ POS_MAP = {
     'noun': 'сущ.', 'verb': 'гл.', 'adjective': 'прил.', 'adverb': 'нареч.',
     'pronoun': 'мест.', 'preposition': 'предл.', 'conjunction': 'союз',
     'interjection': 'межд.', 'numeral': 'числ.', 'particle': 'частица',
+    # короткие имена шаблонов в разделе морфологии ({{adv ru сравн}}, {{predic}}...)
+    'adv': 'наречие', 'adj': 'прилагательное', 'pron': 'местоимение',
+    'num': 'числительное', 'prep': 'предлог', 'conj': 'союз', 'intj': 'междометие',
+    'predic': 'предикатив', 'part': 'частица', 'intro': 'вводное слово',
+    'partic': 'причастие', 'ger': 'деепричастие', 'name': 'имя собственное',
+    'comp': 'сравнительная степень',
 }
 
 EN_POS = {
@@ -338,12 +433,48 @@ EN_POS = {
     'suffix': 'суффикс', 'phrase': 'фраза', 'proper noun': 'имя собственное',
 }
 
+# Слова для описания грамматических форм ({{Форма-гл}}, {{Форма-сущ}} и т. п.)
+FORM_WORDS = {
+    'время': {'п': 'прошедшего времени', 'прош': 'прошедшего времени',
+              'н': 'настоящего времени', 'наст': 'настоящего времени',
+              'б': 'будущего времени', 'буд': 'будущего времени'},
+    'род': {'м': 'мужского рода', 'ж': 'женского рода', 'с': 'среднего рода'},
+    'число': {'ед': 'единственного числа', '1': 'единственного числа',
+              's': 'единственного числа', 'мн': 'множественного числа',
+              '2': 'множественного числа', 'p': 'множественного числа'},
+    'лицо': {'1': '1-го лица', '2': '2-го лица', '3': '3-го лица'},
+    'накл': {'и': 'изъявительного наклонения', 'п': 'повелительного наклонения',
+             'с': 'сослагательного наклонения'},
+    'залог': {'действ': 'действительного залога', 'страд': 'страдательного залога'},
+    'падеж': {'и': 'именительного падежа', 'р': 'родительного падежа',
+              'д': 'дательного падежа', 'в': 'винительного падежа',
+              'т': 'творительного падежа', 'п': 'предложного падежа',
+              'з': 'звательного падежа', 'м': 'местного падежа',
+              'местн': 'местного падежа', 'парт': 'партитивного падежа'},
+    'сравн': {'1': 'сравнительной степени', 'сравн': 'сравнительной степени',
+              'да': 'сравнительной степени'},
+}
+
+FORM_KIND_LABEL = {
+    'гл': 'форма глагола', 'сущ': 'форма существительного',
+    'прил': 'форма прилагательного', 'мест': 'форма местоимения',
+    'числ': 'форма числительного', 'нареч': 'форма наречия',
+    'прич': 'форма причастия', 'деепр': 'форма деепричастия',
+    'предик': 'форма предикатива', 'част': 'форма частицы',
+}
+
+FORM_KIND_WORD = {
+    'гл': 'глагола', 'сущ': 'существительного', 'прил': 'прилагательного',
+    'мест': 'местоимения', 'числ': 'числительного', 'нареч': 'наречия',
+    'предик': 'предикатива', 'част': 'частицы', 'межд': 'междометия',
+}
+
 
 def iter_sections(text, levels):
     """Заголовки вики-текста заданных уровней и их тела."""
     marks = [(m.start(), m.end(), len(m.group(1)), m.group(2).strip())
              for m in HEAD_RE.finditer(text)]
-    for i, (start, end, lvl, title) in enumerate(marks):
+    for i, (_start, end, lvl, title) in enumerate(marks):
         if lvl not in levels:
             continue
         stop = len(text)
@@ -354,13 +485,44 @@ def iter_sections(text, levels):
         yield lvl, title, text[end:stop]
 
 
+def iter_sections_pos(text, levels):
+    """То же, но с позицией заголовка (для сохранения порядка блоков)."""
+    marks = [(m.start(), m.end(), len(m.group(1)), m.group(2).strip())
+             for m in HEAD_RE.finditer(text)]
+    for i, (start, end, lvl, title) in enumerate(marks):
+        if lvl not in levels:
+            continue
+        stop = len(text)
+        for s2, _e2, lvl2, _t2 in marks[i + 1:]:
+            if lvl2 <= lvl:
+                stop = s2
+                break
+        yield start, lvl, title, text[end:stop]
+
+
+def section_lang(title):
+    """Название языкового раздела: «{{-ru-|nocat}}» -> «-ru-», «Русский» -> «русский»."""
+    t = title.strip()
+    m = re.match(r'\{\{\s*([^|}]+)', t)
+    if m:
+        t = m.group(1)
+    return t.strip('{} ').strip().lower()
+
+
 def find_ru_section(wikitext):
-    """Тело русского раздела: `= {{-ru-}} =` или `== Русский ==`."""
+    """Тело русского раздела: `= {{-ru-}} =`, `= {{-ru-|nocat}} =` или `== Русский ==`."""
     for _lvl, title, body in iter_sections(wikitext, (1, 2)):
-        t = title.strip().strip('{}').strip().lower()
-        if t in ('-ru-', 'русский', 'ru'):
+        if section_lang(title) in ('-ru-', 'русский', 'ru'):
             return body
     return None
+
+
+def pos_from_homonym(title):
+    """Часть речи из заголовка омонима: «{{з|(наречие I)}}» -> «наречие»."""
+    m = re.search(r'\(([^()]+)\)', title)
+    text = m.group(1) if m else title
+    text = re.sub(r'\s+[IVXLC]+$', '', text).strip(' .').lower()
+    return text or None
 
 
 def detect_pos(segment):
@@ -380,28 +542,187 @@ def extract_defs(segment, limit=420):
         if not s.startswith('# '):
             continue
         t = clean_wiki(s[2:].strip())
-        if t and len(t) > 1:
+        # Если после удаления помет «(разг.)», «(груб.)» и знаков препинания
+        # не осталось ни букв, ни цифр — это не толкование, а одни пометы.
+        core = re.sub(r'\([^()]*\)', '', t)
+        core = re.sub(r'[^А-Яа-яЁёA-Za-z0-9]', '', core)
+        if core:
             out.append({'text': cut(t, limit), 'example': None})
     return out
 
 
+# ------------------------- разбор грамматических форм -------------------------
+
+def find_named_templates(text, prefixes):
+    """Найти шаблоны верхнего уровня, имя которых начинается с одного из префиксов."""
+    results = []
+    i = 0
+    n = len(text)
+    while i < n - 1:
+        start = text.find('{{', i)
+        if start < 0:
+            break
+        depth = 0
+        j = start
+        closed = False
+        while j < n - 1:
+            if text.startswith('{{', j):
+                depth += 1
+                j += 2
+                continue
+            if text.startswith('}}', j):
+                depth -= 1
+                j += 2
+                if depth == 0:
+                    closed = True
+                    break
+                continue
+            j += 1
+        if not closed:
+            break
+        inner = text[start + 2:j - 2]
+        name = split_template_args(inner)[0].strip().lower()
+        if any(name.startswith(p) for p in prefixes):
+            results.append((start, inner))
+            i = j
+        else:
+            i = start + 2
+    return results
+
+
+def parse_form_template(inner):
+    """Разобрать {{Форма-гл|...}} / {{Форма-сущ|...}} в подпись и описание.
+
+    Возвращает (заголовок блока, текст) или None.
+    """
+    parts = split_template_args(inner)
+    name = re.sub(r'\s+', ' ', parts[0]).strip().lower()
+    named = {}
+    positional = []
+    for arg in parts[1:]:
+        arg = arg.strip()
+        m = re.match(r'^([^\s=|]+)\s*=\s*(.*)$', arg, re.S)
+        if m:
+            named[m.group(1).lower()] = m.group(2).strip()
+        else:
+            positional.append(arg)
+
+    def val(*keys):
+        for k in keys:
+            if named.get(k):
+                return named[k]
+        return ''
+
+    def pos_arg(idx):
+        return positional[idx] if len(positional) > idx else ''
+
+    kind = name.split('-', 1)[1].strip() if '-' in name else ''
+    base = (val('база', 'слово', 'лексема') or pos_arg(0)).split('#')[0].strip()
+    base = clean_wiki(base).rstrip('.') if base else ''
+
+    def clean_no_dot(text):
+        """Очистить вики-текст и убрать точку в конце (она тут лишняя)."""
+        cleaned = clean_wiki(text)
+        return cleaned[:-1] if cleaned.endswith('.') else cleaned
+
+    mark = clean_no_dot(val('помета')) if val('помета') else ''
+    znach = clean_no_dot(val('знач', 'значение')) if val('знач', 'значение') else ''
+    komment = clean_no_dot(val('коммент', 'комментарий')) if val('коммент', 'комментарий') else ''
+
+    descriptors = []
+
+    def add(group, value):
+        v = (value or '').strip().lower()
+        if not v:
+            return
+        word = FORM_WORDS.get(group, {}).get(v)
+        if word:
+            descriptors.append(word)
+
+    if kind == 'гл':
+        add('время', val('время') or pos_arg(1))
+        add('род', val('род') or pos_arg(3))
+        add('число', val('число') or pos_arg(2))
+        add('лицо', val('лицо'))
+        add('накл', val('накл'))
+        add('залог', val('залог'))
+        for key, word in (('прич', 'причастие'), ('деепр', 'деепричастие'),
+                          ('кр', 'краткой формы')):
+            if val(key):
+                descriptors.append(word)
+    else:
+        add('падеж', val('падеж') or pos_arg(1))
+        add('род', val('род') or pos_arg(3))
+        add('число', val('число') or pos_arg(2))
+        add('сравн', val('сравн'))
+        if val('кр'):
+            descriptors.append('краткой формы')
+
+    kind_word = FORM_KIND_WORD.get(kind, '')
+    if descriptors:
+        text = 'форма %s %s' % (', '.join(descriptors), kind_word or 'слова')
+    elif kind_word:
+        text = 'форма %s' % kind_word
+    else:
+        text = 'форма слова'
+    if base:
+        text += ' «%s»' % base
+    if mark:
+        text = '%s %s' % (mark, text)
+    if komment:
+        text = '%s (%s)' % (text, komment)
+    if znach:
+        text = '%s (значение: %s)' % (text, znach)
+    if not base and not descriptors and not kind_word:
+        return None
+    return FORM_KIND_LABEL.get(kind, 'форма слова'), text
+
+
+def extract_form_blocks(body):
+    """Блоки «форма слова» в порядке появления в статье -> [(позиция, блок)]."""
+    out = []
+    for position, inner in find_named_templates(body, ('форма', 'форм:')):
+        parsed = parse_form_template(inner)
+        if not parsed:
+            continue
+        label, text = parsed
+        out.append((position, {'pos': label,
+                               'defs': [{'text': cut(text, 380), 'example': None}]}))
+    return out
+
+
 def parse_ru_section(wikitext, max_defs=5):
-    """Разобрать русскую статью в блоки [{часть речи, значения}]."""
+    """Разобрать русскую статью в блоки [{часть речи, значения}] по порядку статьи."""
     body = find_ru_section(wikitext)
     if body is None:
         return []
-    blocks = []
+    items = []
     cur_pos = None
-    for _lvl, title, segment in iter_sections(body, (3, 4)):
+    homonym_pos = None
+    for position, lvl, title, segment in iter_sections_pos(body, (2, 3, 4)):
         t = title.strip()
-        if 'Морфологическ' in t:
+        if lvl == 2:
+            homonym_pos = pos_from_homonym(t)   # «(наречие I)» -> «наречие»
+            cur_pos = None
+        elif 'Морфологическ' in t:
             pos = detect_pos(segment)
             if pos:
                 cur_pos = pos
         elif t.startswith('Значение'):
             defs = extract_defs(segment)
             if defs:
-                blocks.append({'pos': cur_pos, 'defs': defs[:max_defs]})
+                items.append((position, {'pos': cur_pos or homonym_pos,
+                                         'defs': defs[:max_defs]}))
+    items.extend(extract_form_blocks(body))
+    items.sort(key=lambda pair: pair[0])
+
+    blocks = []
+    for _position, block in items:
+        pos = block.get('pos') or ''
+        if blocks and blocks[-1].get('pos') == block.get('pos') and pos.startswith('форма'):
+            blocks[-1]['defs'].extend(block['defs'])   # объединяем формы одного вида
+        else:
+            blocks.append(block)
     return blocks
 
 
@@ -424,7 +745,6 @@ def parse_enwiktionary(wikitext, lang_title):
         if defs:
             blocks.append({'pos': pos, 'defs': defs[:4]})
     return blocks
-
 
 # ---------------------------------------------------------------------------
 #  Источники данных (с кэшем на диске)
