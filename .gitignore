@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Виртуальные окружения ---
+.venv/
+venv/
+
+# --- Сборка PyInstaller ---
+build/
+dist/
+*.spec
+
+# --- Файлы, которые «Словарик» создаёт сам при работе ---
+slovarik_cache.json
+slovarik.log
+
+# Если измените настройки в slovarik.json и не хотите публиковать их —
+# уберите символ # в следующей строке:
+# slovarik.json
+
+# --- Редакторы и системные файлы ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

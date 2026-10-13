@@ -1,0 +1,9 @@
+# Служебный файл Git: следит за правильными переводами строк в файлах
+* text=auto
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary
